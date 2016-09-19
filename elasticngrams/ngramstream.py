@@ -36,57 +36,75 @@ class NgramBase(object):
         )
 
         self.multigram_standalones = tuple(digits) + self.speech_parts
-        self.multigtam_combos = tuple(
+        self.multigram_combos = tuple(
             ''.join(combo) for combo in itertools.product(ascii_lowercase, '_'+ascii_lowercase)
         )
 
-class NgramUtility(NgramBase):
-    def __init__(self):
+class NgramSources(NgramBase):
+    def __init__(self, language=None, version=None):
         NgramBase.__init__(self)
 
-    def get_sizes(self, language=None, version=None):
         self.language = 'english' if language is None else language
-        self.language_resource = self.languages[self.language]
         self.version = 2 if version is None else version
 
-        self.resource_sizes = deque()
+        self.source_sizes = deque()
 
-    def _get_sizes_thread(self):
+    def get_sizes(self):
+        if not hasattr(self, 'sizing_threads'):
 
-        # data_dir = pathlib.Path('../data/').mkdir(exist_ok=True)
-        # sizes_file = pathlib.Path('../data/{}-{}-sizes.csv'.format(
-        #     self.language_resource,
-        #     self.versions[self.version]
-        # ))
-        # with sizes_file.open('w', encoding='utf-8', newline='') as f:
-        #     csvwriter = csv.writer(f, lineterminator='\n', delimiter='\t')
+            self.sizing_threads = []
 
-        for resource in self.onegram_standalones:
-            resp = requests.head(self._generate_sizes_url(1, resource))
+            for i in range(1, 6):
+                for chunk in range(5):
+                    self.sizing_threads.append(threading.Thread(target=self._get_sizes_thread, args=(i,5,chunk)))
+                    self.sizing_threads[-1].start()
+
+        return self.sizing_threads
+
+    def _get_sizes_thread(self, n, divisor=None, chunk=None):
+
+        if n == 1:
+            sources_list = self.onegram_standalones
+        else:
+            sources_list = (self.multigram_standalones + self.multigram_combos)
+
+        if divisor is not None and chunk is not None:
+            chunk_start = int(len(sources_list)/divisor) * chunk
+            if chunk == divisor-1:
+                chunk_end   = len(sources_list)
+            else:
+                chunk_end   = int(len(sources_list)/divisor) * chunk + int(len(sources_list)/divisor)
+
+            print(n, len(sources_list), chunk_start, chunk_end)
+            sources_list = sources_list[chunk_start:chunk_end]
+
+        for source in sources_list:
+            source_url = self._generate_source_url(n, source)
+            resp = requests.head(source_url)
             size = int(resp.headers['content-length'])#/1000000
-            resource = [
-                self.language_resource,
-                self.versions[self.version],
-                '1gram',
-                resource,
-                '{}'.format(size)
-            ]
-            csvwriter.writerow(row)
+            source_info = {
+                'language': self.languages[self.language],
+                'version': self.versions[self.version],
+                'ngram': n,
+                'letters': source,
+                'size': size,
+                'url': source_url
+            }
 
-        for i in range(2, 6):
-            for resource in (self.multigram_standalones + self.multigtam_combos):
-                resp = requests.head(self._generate_sizes_url(i, resource))
-                size = int(resp.headers['content-length'])#/1000000
-                row = [
-                    self.language_resource,
-                    self.versions[self.version],
-                    '{}gram'.format(i),
-                    resource,
-                    '{}'.format(size)
-                ]
-                csvwriter.writerow(row)
+            self.source_sizes.appendleft(source_info)
 
-    def _generate_sizes_url(self, ngram, letters):
+        return
+
+    def __len__(self):
+        return len(self.source_sizes)
+
+    def __next__(self):
+        try:
+            return self.source_sizes.pop()
+        except IndexError:
+            return False
+
+    def _generate_source_url(self, ngram, letters):
 
         return (
             'http://storage.googleapis.com/books/ngrams/books/googlebooks-'
@@ -143,7 +161,7 @@ class NgramStream(NgramBase):
             else:
                 raise ValueError('Letters argument is invalid for 1gram.')
         elif self.ngram in range(2,6):
-            if letters in (self.multigram_standalones + self.multigtam_combos):
+            if letters in (self.multigram_standalones + self.multigram_combos):
                 self.letters = letters
             else:
                 raise ValueError('Letters argument is invalid for {}gram'.format(self.ngram))
