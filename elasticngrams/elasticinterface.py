@@ -4,6 +4,7 @@ import time
 import threading
 import hashlib
 import random
+import queue
 from collections import deque
 from .ngramstream import NgramBase, NgramSources, NgramStream
 
@@ -385,7 +386,9 @@ class ElasticInterface(ElasticUtility):
                 agg_max_year    = self.agg_max_year
             )
 
-            stream.download()
+            failure_signal = queue.Queue(maxsize=1)
+            stream.download(signal=failure_signal)
+
             next_ngram = next(stream)
             while(stream.thread_live or next_ngram):
                 if next_ngram is not False:
@@ -394,18 +397,25 @@ class ElasticInterface(ElasticUtility):
 
                 next_ngram = next(stream)
 
-            download_time = int(time.perf_counter() - start_time) + 0.01
-            print('Downloaded {} from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
-            mark_downloaded = requests.post(
-                '{}/source/{}/_update'.format(self.index_url, source['_id']),
-                data=json.dumps({
-                    "doc": {
-                        "downloaded": "true",
-                        "download_count": ngram_count,
-                        "download_duration": download_time
-                    }
-                })
-            )
+            if failure_signal.empty():
+
+                download_time = int(time.perf_counter() - start_time) + 0.01
+                print('Downloaded {} from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
+                mark_downloaded = requests.post(
+                    '{}/source/{}/_update'.format(self.index_url, source['_id']),
+                    data=json.dumps({
+                        "doc": {
+                            "downloaded": "true",
+                            "download_count": ngram_count,
+                            "download_duration": download_time
+                        }
+                    })
+                )
+            else:
+                exc_type, exc_value, exc_traceback = failure_signal.get()
+                if exc_type is RuntimeError:
+                    print('Failure to download {}gram-{}:'.format(ngram_info['ngram'], ngram_info['letters']))
+                    print('\t - RuntimeError: {}'.format(exc_value))
 
             ngram_count = 0
 

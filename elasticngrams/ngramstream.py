@@ -10,6 +10,8 @@ import time
 import threading
 import pathlib
 import csv
+import queue
+import sys
 
 class NgramBase(object):
     def __init__(self):
@@ -232,6 +234,7 @@ class NgramStream(NgramBase):
         self.resource_url = self._generate_url()
 
         self.ngram_stream = deque()
+        self.failure_signal = None
 
     def _generate_url(self):
 
@@ -252,7 +255,8 @@ class NgramStream(NgramBase):
     def __len__(self):
         return len(self.ngram_stream)
 
-    def download(self):
+    def download(self, signal=None):
+        self.failure_signal = signal
         self.download_thread = threading.Thread(target=self._download_thread)
         self.download_thread.start()
 
@@ -260,8 +264,7 @@ class NgramStream(NgramBase):
 
     def _download_thread(self):
         self.thread_live = True
-        def next_line():
-            retry_counter = 0
+        def next_line(retry_counter=0):
             try:
                 return self.zipped.readline()
             except ValueError:
@@ -270,9 +273,14 @@ class NgramStream(NgramBase):
             except:
                 if retry_counter < 5:
                     retry_counter += 1
-                    return next_line()
+                    return next_line(retry_counter)
                 else:
-                    raise RuntimeError('Failed to get next line from ngram stream')
+                    if self.failure_signal is not None:
+                        self.failure_signal.put(sys.exc_info())
+                        self.thread_live = False
+                        return False
+                    else:
+                        raise RuntimeError('Failed to get next line from ngram stream')
 
         with closing(requests.get(self.resource_url, stream=True)) as r:
 
