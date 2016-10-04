@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import hashlib
+import random
 from collections import deque
 from .ngramstream import NgramBase, NgramSources, NgramStream
 
@@ -263,8 +264,7 @@ class ElasticInterface(ElasticUtility):
         self.get_totals()
         self.get_sizes()
 
-    def download_ngrams(self):
-
+    def _update_unprocessed(self):
         unprocessed_query = {
             "sort": {"size": {"order": "desc"} },
             "query": {
@@ -286,27 +286,29 @@ class ElasticInterface(ElasticUtility):
             '{}/source/_search'.format(self.index_url),
             data=json.dumps(unprocessed_query)
         )
-        self.unprocessed_sources = deque(unprocessed_sources.json()['hits']['hits'])
+
+        unprocessed_sources = deque(unprocessed_sources.json()['hits']['hits'])
+        random.shuffle(unprocessed_sources)
+
+        self.unprocessed_sources = unprocessed_sources
+
+    def download_ngrams(self):
 
         self.stream_threads = []
         self.stream_count = 0
         self.downloaded_ngrams = deque()
+        self._update_unprocessed()
 
-        # for i in range(5):
-        #     self.stream_threads.append(
-        #         threading.Thread(target=self._download_thread, args=(True,))
-        #     )
-        #     self.stream_threads[-1].start()
-
-        for i in range(5):
+        for i in range(2):
             self.stream_threads.append(
-                threading.Thread(target=self._download_thread, args=(False,))
+                threading.Thread(target=self._download_thread, args=(i,))
             )
             self.stream_threads[-1].start()
+            time.sleep(0.1)
 
         self.download_counter = 0
         self.upload_threads = []
-        for i in range(4):
+        for i in range(3):
             self.upload_threads.append(
                 threading.Thread(target=self._upload_thread)
             )
@@ -336,9 +338,9 @@ class ElasticInterface(ElasticUtility):
             else:
                 continue
 
-            if len(bulk_string) % 10000 == 0 and len(bulk_string) > 0:
+            if len(bulk_string) % 25000 == 0 and len(bulk_string) > 0:
                 print('Downloaded {} on thread {}'.format(len(bulk_string), threading.get_ident()))
-            if len(bulk_string) % 10000 == 0 and len(bulk_string) > 0:
+            if len(bulk_string) % 25000 == 0 and len(bulk_string) > 0:
                 bulk_string.append(b' ')
                 bulk_string = b'\n'.join(bulk_string)
                 resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
@@ -355,17 +357,20 @@ class ElasticInterface(ElasticUtility):
         if resp.status_code not in {requests.codes.created, requests.codes.ok}:
             print(resp.status_code, resp.text)
 
-    def _download_thread(self, from_top=True):
+    def _download_thread(self, thread_index=0):
         self.stream_count += 1
         while(len(self.unprocessed_sources) > 0):
             start_time = time.perf_counter()
+
+            if thread_index == 0:
+                self._update_unprocessed()
+                print('Shuffling unprocessed sources...')
+
             ngram_count = 0
-            if from_top:
-                source = self.unprocessed_sources.popleft()
-            else:
-                source = self.unprocessed_sources.pop()
+            source = self.unprocessed_sources.pop()
 
             ngram_info = source['_source']
+            print('Processing {}gram-{}...'.format(ngram_info['ngram'], ngram_info['letters']))
             stream = NgramStream(
                 ngram       = ngram_info['ngram'],
                 letters     = ngram_info['letters'],

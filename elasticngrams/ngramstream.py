@@ -282,7 +282,7 @@ class NgramStream(NgramBase):
                 self.thread_live = False
                 return
 
-            file_buffer = 2500000
+            file_buffer = 65536
             if resource_size <= file_buffer:
                 file_buffer = int(resource_size / 2)
 
@@ -310,6 +310,13 @@ class NgramStream(NgramBase):
             chunk       = 0
             while line:
                 line_no += 1
+
+                if line_no % 100000 == 1:
+                    curr = time.perf_counter() - timestamp
+                    total_time += curr
+                    print('Extracted {} in {:.2f}s ({}/s) | Processed: {} in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), line_no, total_time, int(line_no/total_time)))
+                    timestamp = time.perf_counter()
+                    chunk = 0
 
                 line_full   = line.decode().split('\t')
                 ngram_full  = line_full[0]
