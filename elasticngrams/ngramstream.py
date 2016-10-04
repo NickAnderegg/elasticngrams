@@ -44,25 +44,60 @@ class NgramSources(NgramBase):
     def __init__(self, language=None, version=None):
         NgramBase.__init__(self)
 
-        self.language = 'english' if language is None else language
-        self.version = 2 if version is None else version
+        language = 'english' if language is None else language
+        if language in self.languages.keys():
+            self.language = self.languages[language]
+        elif language in self.languages.values():
+            self.language = language
 
-        self.source_sizes = deque()
+        version = 2 if version is None else version
+        if version in {1,2}:
+            self.version = self.versions[version]
+        elif version in self.versions.values():
+            self.version = version
+
+    def get_totals(self):
+        totals_url = (
+            'http://storage.googleapis.com/books/ngrams/books/googlebooks-'
+            '{}-totalcounts-{}.txt'.format(
+                self.language,
+                self.version
+            )
+        )
+
+        resp = requests.get(totals_url)
+        totals_file = resp.text
+        totals_file = totals_file.split('\t')[1:-1]
+
+        totals = []
+        for total in totals_file:
+            total = total.split(',')
+            totals.append({
+                'year': int(total[0]),
+                'counts': int(total[1]),
+                'pages': int(total[2]),
+                'volumes': int(total[3])
+            })
+
+        return totals
 
     def get_sizes(self):
         if not hasattr(self, 'sizing_threads'):
 
+            self.source_sizes = deque()
             self.sizing_threads = []
+            self.num_threads = 0
 
             for i in range(1, 6):
                 for chunk in range(5):
                     self.sizing_threads.append(threading.Thread(target=self._get_sizes_thread, args=(i,5,chunk)))
                     self.sizing_threads[-1].start()
 
-        return self.sizing_threads
+        return self.source_sizes
 
     def _get_sizes_thread(self, n, divisor=None, chunk=None):
 
+        self.num_threads += 1
         if n == 1:
             sources_list = self.onegram_standalones
         else:
@@ -75,7 +110,7 @@ class NgramSources(NgramBase):
             else:
                 chunk_end   = int(len(sources_list)/divisor) * chunk + int(len(sources_list)/divisor)
 
-            print(n, len(sources_list), chunk_start, chunk_end)
+            # print(n, len(sources_list), chunk_start, chunk_end)
             sources_list = sources_list[chunk_start:chunk_end]
 
         for source in sources_list:
@@ -83,8 +118,8 @@ class NgramSources(NgramBase):
             resp = requests.head(source_url)
             size = int(resp.headers['content-length'])#/1000000
             source_info = {
-                'language': self.languages[self.language],
-                'version': self.versions[self.version],
+                # 'language': self.languages[self.language],
+                # 'version': self.versions[self.version],
                 'ngram': n,
                 'letters': source,
                 'size': size,
@@ -93,6 +128,7 @@ class NgramSources(NgramBase):
 
             self.source_sizes.appendleft(source_info)
 
+        self.num_threads -= 1
         return
 
     def __len__(self):
@@ -109,9 +145,9 @@ class NgramSources(NgramBase):
         return (
             'http://storage.googleapis.com/books/ngrams/books/googlebooks-'
             '{}-{}gram-{}-{}.gz'.format(
-                self.languages[self.language],
+                self.language,
                 ngram,
-                self.versions[self.version],
+                self.version,
                 letters
             )
         )
@@ -168,6 +204,8 @@ class NgramStream(NgramBase):
 
         # Set language instance variable
         if language in self.languages.keys():
+            self.language = self.languages[language]
+        elif language in self.languages.values():
             self.language = language
         else:
             raise ValueError('Invalid language argument. Acceptable values are:\n  -{}'.format(
@@ -176,6 +214,8 @@ class NgramStream(NgramBase):
 
         # Set version instance variable
         if version in {1,2}:
+            self.version = self.versions[version]
+        elif version in self.versions.values():
             self.version = version
         else:
             raise ValueError('Invalid version number. Use version 1 or 2, not the version date.')
@@ -197,9 +237,9 @@ class NgramStream(NgramBase):
 
         return '{}-{}-{}-{}-{}.gz'.format(
             self.base_url,
-            self.languages[self.language],
+            self.language,
             '{}gram'.format(self.ngram),
-            self.versions[self.version],
+            self.version,
             self.letters
         )
 
@@ -219,21 +259,30 @@ class NgramStream(NgramBase):
         return
 
     def _download_thread(self):
-
+        self.thread_live = True
         def next_line():
+            retry_counter = 0
             try:
                 return self.zipped.readline()
             except ValueError:
+                self.thread_live = False
                 return False
+            except:
+                if retry_counter < 5:
+                    retry_counter += 1
+                    return next_line()
+                else:
+                    raise RuntimeError('Failed to get next line from ngram stream')
 
         with closing(requests.get(self.resource_url, stream=True)) as r:
 
             resource_size = int(r.headers['content-length'])
             if  resource_size == 0:
                 print('No such resource: {}'.format(self.resource_url))
+                self.thread_live = False
                 return
 
-            file_buffer = 500000
+            file_buffer = 2500000
             if resource_size <= file_buffer:
                 file_buffer = int(resource_size / 2)
 
@@ -243,9 +292,10 @@ class NgramStream(NgramBase):
             try:
                 line = self.zipped.readline()
             except OSError:
-                print('Skipped {}'.format(self.resource_url))
+                # print('Skipped {}'.format(self.resource_url))
                 # file_loc = pathlib.Path('downloaded/{}grams/condensed-{}.csv'.format(xgram,file_ref))
                 # file_loc.touch()
+                self.thread_live = False
                 return
 
             timestamp = time.perf_counter()
@@ -285,6 +335,11 @@ class NgramStream(NgramBase):
                         'n': len(ngram_split),
                         'ngram_full': ngram_full
                     }
+
+                    if self.max_year:
+                        current_ngram['max_year'] = self.max_year
+                    if self.min_year:
+                        current_ngram['min_year'] = self.min_year
 
                     for i in range(0, self.ngram):
                         current_ngram['token_{}'.format(i+1)] = ngram_split[i]
@@ -333,6 +388,7 @@ class NgramStream(NgramBase):
 
                 line = next_line()
 
+        self.thread_live = False
         return
 
                 # if line_no % 100000 == 0:
