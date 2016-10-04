@@ -311,7 +311,7 @@ class NgramStream(NgramBase):
             while line:
                 line_no += 1
 
-                if line_no % 100000 == 1:
+                if line_no % 10000000 == 0:
                     curr = time.perf_counter() - timestamp
                     total_time += curr
                     print('Extracted {} in {:.2f}s ({}/s) | Processed: {} in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), line_no, total_time, int(line_no/total_time)))
