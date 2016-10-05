@@ -309,7 +309,7 @@ class ElasticInterface(ElasticUtility):
 
         self.download_counter = 0
         self.upload_threads = []
-        for i in range(3):
+        for i in range(5):
             self.upload_threads.append(
                 threading.Thread(target=self._upload_thread)
             )
@@ -336,27 +336,27 @@ class ElasticInterface(ElasticUtility):
                 bulk_string.append(bytes(create_string, 'utf-8'))
                 bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
                 self.download_counter += 1
-            else:
-                continue
 
-            if len(bulk_string) % 25000 == 0 and len(bulk_string) > 0:
-                print('Downloaded {} on thread {}'.format(len(bulk_string), threading.get_ident()))
-            if len(bulk_string) % 25000 == 0 and len(bulk_string) > 0:
-                bulk_string.append(b' ')
-                bulk_string = b'\n'.join(bulk_string)
-                resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
-                if resp.status_code not in {requests.codes.created, requests.codes.ok}:
-                    print(resp.status_code, resp.text)
+                if (len(bulk_string)/2) % 10000 == 0 and len(bulk_string) > 0:
+                    print('Uploaded {} on thread {} | {} in download queue'.format(int(len(bulk_string)/2), threading.get_ident(), len(self.downloaded_ngrams)))
+                    print('Total downloaded: {}'.format(self.download_counter))
+                    bulk_string.append(b' ')
+                    bulk_string = b'\n'.join(bulk_string)
+                    resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
+                    if resp.status_code not in {requests.codes.created, requests.codes.ok}:
+                        print(resp.status_code, resp.text)
 
-                # print("{} threads running".format(threading.active_count()))
+                    # print("{} threads running".format(threading.active_count()))
 
-                bulk_string = deque()
+                    bulk_string = deque()
 
         bulk_string.append(' ')
         bulk_string = bytearray('\n'.join(bulk_string), 'utf-8')
         resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
         if resp.status_code not in {requests.codes.created, requests.codes.ok}:
             print(resp.status_code, resp.text)
+
+        print('\n\nUpload thread {} is exiting...\n\n'.format(threading.get_ident()))
 
     def _download_thread(self, thread_index=0):
         self.stream_count += 1
@@ -395,11 +395,15 @@ class ElasticInterface(ElasticUtility):
                     self.downloaded_ngrams.append(next_ngram)
                     ngram_count += 1
 
+                    if ngram_count % 10000 == 0:
+                        download_time = int(time.perf_counter() - start_time) + 0.00001
+                        print('Downloaded {} ngrams from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
+
                 next_ngram = next(stream)
 
             if failure_signal.empty():
 
-                download_time = int(time.perf_counter() - start_time) + 0.01
+                download_time = int(time.perf_counter() - start_time) + 0.00001
                 print('Downloaded {} from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
                 mark_downloaded = requests.post(
                     '{}/source/{}/_update'.format(self.index_url, source['_id']),
