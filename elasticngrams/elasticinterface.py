@@ -300,7 +300,7 @@ class ElasticInterface(ElasticUtility):
         self.downloaded_ngrams = deque()
         self._update_unprocessed()
 
-        for i in range(2):
+        for i in range(1):
             self.stream_threads.append(
                 threading.Thread(target=self._download_thread, args=(i,))
             )
@@ -309,12 +309,12 @@ class ElasticInterface(ElasticUtility):
 
         self.download_counter = 0
         self.upload_threads = []
-        for i in range(5):
+        for i in range(3):
             self.upload_threads.append(
                 threading.Thread(target=self._upload_thread)
             )
             self.upload_threads[-1].start()
-            time.sleep(10)
+            time.sleep(0.1)
 
         for thread in self.upload_threads:
             thread.join()
@@ -340,7 +340,7 @@ class ElasticInterface(ElasticUtility):
                 if self.download_counter % 10000 == 0:
                     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
 
-                if (len(bulk_string)/2) % 10000 == 0 and len(bulk_string) > 0:
+                if (len(bulk_string)/2) % 2500 == 0 and len(bulk_string) > 0:
                     print('Uploaded {} on thread {} | {} in download queue'.format(int(len(bulk_string)/2), threading.get_ident(), len(self.downloaded_ngrams)))
                     # print('Total downloaded: {}'.format(self.download_counter))
                     bulk_string.append(b' ')
@@ -401,6 +401,9 @@ class ElasticInterface(ElasticUtility):
                     if ngram_count % 10000 == 0:
                         download_time = int(time.perf_counter() - start_time) + 0.00001
                         print('Downloaded {} ngrams from {}gram-{} at {}/sec | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time), len(self.downloaded_ngrams)))
+
+                    if len(self.downloaded_ngrams) > 25000:
+                        time.sleep(len(self.downloaded_ngrams) * 0.000001)
 
                 next_ngram = next(stream)
 

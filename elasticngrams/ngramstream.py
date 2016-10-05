@@ -327,11 +327,7 @@ class NgramStream(NgramBase):
                     chunk = 0
 
                 line_full   = line.decode().split('\t')
-                ngram_full  = line_full[0]
                 ngram_year  = int(line_full[1])
-                ngram_split = ngram_full.split(' ')
-                ngram_count = int(line_full[2])
-                ngram_vols  = int(line_full[3])
 
                 if self.min_year and ngram_year < self.min_year:
                     line = next_line()
@@ -339,6 +335,11 @@ class NgramStream(NgramBase):
                 if self.max_year and ngram_year > self.max_year:
                     line = next_line()
                     continue
+
+                ngram_full  = line_full[0]
+                ngram_split = ngram_full.split(' ')
+                ngram_count = int(line_full[2])
+                ngram_vols  = int(line_full[3])
 
                 chunk += 1
                 added += 1
