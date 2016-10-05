@@ -402,8 +402,8 @@ class ElasticInterface(ElasticUtility):
                         download_time = int(time.perf_counter() - start_time) + 0.00001
                         print('Downloaded {} ngrams from {}gram-{} at {}/sec | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time), len(self.downloaded_ngrams)))
 
-                    if len(self.downloaded_ngrams) > 25000:
-                        time.sleep(len(self.downloaded_ngrams) * 0.000001)
+                    if len(self.downloaded_ngrams) > 15000:
+                        time.sleep(len(self.downloaded_ngrams) * 0.0000001)
 
                 next_ngram = next(stream)
 
