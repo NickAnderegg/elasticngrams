@@ -337,9 +337,12 @@ class ElasticInterface(ElasticUtility):
                 bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
                 self.download_counter += 1
 
+                if self.download_counter % 10000 == 0:
+                    print('Upload thread download counter: {} ngrams'.format(self.download_counter))
+
                 if (len(bulk_string)/2) % 10000 == 0 and len(bulk_string) > 0:
                     print('Uploaded {} on thread {} | {} in download queue'.format(int(len(bulk_string)/2), threading.get_ident(), len(self.downloaded_ngrams)))
-                    print('Total downloaded: {}'.format(self.download_counter))
+                    # print('Total downloaded: {}'.format(self.download_counter))
                     bulk_string.append(b' ')
                     bulk_string = b'\n'.join(bulk_string)
                     resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
@@ -397,7 +400,7 @@ class ElasticInterface(ElasticUtility):
 
                     if ngram_count % 10000 == 0:
                         download_time = int(time.perf_counter() - start_time) + 0.00001
-                        print('Downloaded {} ngrams from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
+                        print('Downloaded {} ngrams from {}gram-{} at {}/sec | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time), len(self.downloaded_ngrams)))
 
                 next_ngram = next(stream)
 
