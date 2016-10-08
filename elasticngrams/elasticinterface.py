@@ -300,7 +300,7 @@ class ElasticInterface(ElasticUtility):
         self.downloaded_ngrams = deque()
         self._update_unprocessed()
 
-        for i in range(1):
+        for i in range(2):
             self.stream_threads.append(
                 threading.Thread(target=self._download_thread, args=(i,))
             )
@@ -314,7 +314,7 @@ class ElasticInterface(ElasticUtility):
                 threading.Thread(target=self._upload_thread)
             )
             self.upload_threads[-1].start()
-            time.sleep(0.1)
+            time.sleep(10)
 
         for thread in self.upload_threads:
             thread.join()
@@ -337,17 +337,22 @@ class ElasticInterface(ElasticUtility):
                 bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
                 self.download_counter += 1
 
-                if self.download_counter % 10000 == 0:
-                    print('Upload thread download counter: {} ngrams'.format(self.download_counter))
+                # if self.download_counter % 50000 == 0:
+                #     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
 
-                if (len(bulk_string)/2) % 2500 == 0 and len(bulk_string) > 0:
-                    print('Uploaded {} on thread {} | {} in download queue'.format(int(len(bulk_string)/2), threading.get_ident(), len(self.downloaded_ngrams)))
+                if (len(bulk_string)/2) % 7500 == 0 and len(bulk_string) > 0:
+                    print('Uploading {} on thread {} | {} in download queue'.format(int(len(bulk_string)/2), threading.get_ident(), len(self.downloaded_ngrams)))
                     # print('Total downloaded: {}'.format(self.download_counter))
+                    # encoding_start = time.perf_counter()
                     bulk_string.append(b' ')
                     bulk_string = b'\n'.join(bulk_string)
+                    # print('Finished encoding on thread {} in {}s'.format(threading.get_ident(), int(time.perf_counter() - encoding_start)))
+                    # upload_start = time.perf_counter()
                     resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
                     if resp.status_code not in {requests.codes.created, requests.codes.ok}:
                         print(resp.status_code, resp.text)
+                    # else:
+                    #     print('Upload on thread {} completed in {}s'.format(threading.get_ident(), int(time.perf_counter() - upload_start)))
 
                     # print("{} threads running".format(threading.active_count()))
 
