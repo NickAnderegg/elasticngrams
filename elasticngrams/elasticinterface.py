@@ -300,7 +300,7 @@ class ElasticInterface(ElasticUtility):
         self.downloaded_ngrams = deque()
         self._update_unprocessed()
 
-        for i in range(2):
+        for i in range(1):
             self.stream_threads.append(
                 threading.Thread(target=self._download_thread, args=(i,))
             )
@@ -325,6 +325,8 @@ class ElasticInterface(ElasticUtility):
             if len(self.downloaded_ngrams) > 0:
                 try:
                     next_ngram = self.downloaded_ngrams.popleft()
+                    if len(self.downloaded_ngrams) > 5000:
+                        time.sleep((len(self.downloaded_ngrams)**2) * 0.0000003)
                 except IndexError:
                     continue
 
