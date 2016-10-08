@@ -2,7 +2,7 @@ import requests
 import json
 import time
 import threading
-import hashlib
+import hashlib, base64
 import random
 import queue
 from collections import deque
@@ -38,7 +38,7 @@ class ElasticUtility(object):
         except:
             raise RuntimeError('Could not contact elasticsearch database at {}'.format(database_url))
 
-        self.mapping = '''{
+        self.sources_mapping = '''{
             "mappings": {
                 "source": {
                     "properties": {
@@ -59,6 +59,30 @@ class ElasticUtility(object):
                         }
                     }
                 },
+                "total": {
+                    "properties": {
+                        "year": {
+                            "type": "short"
+                        },
+                        "counts": {
+                            "type": "long",
+                            "index": "yes"
+                        },
+                        "pages": {
+                            "type": "long",
+                            "index": "yes"
+                        },
+                        "volumes": {
+                            "type": "long",
+                            "index": "yes"
+                        }
+                    }
+                }
+            }
+        }'''
+
+        self.ngrams_mapping = '''{
+            "mappings": {
                 "ngram": {
                     "properties": {
                         "n": {
@@ -121,48 +145,46 @@ class ElasticUtility(object):
                             "type": "short"
                         }
                     }
-                },
-                "total": {
-                    "properties": {
-                        "year": {
-                            "type": "short"
-                        },
-                        "counts": {
-                            "type": "long",
-                            "index": "yes"
-                        },
-                        "pages": {
-                            "type": "long",
-                            "index": "yes"
-                        },
-                        "volumes": {
-                            "type": "long",
-                            "index": "yes"
-                        }
-                    }
                 }
             }
         }'''
 
-        self.index = 'ngrams-{}-{}'.format(
+        self.sources_index = 'ngrams-{}-{}-sources'.format(
             self.language,
             self.version
         )
-        self.index_url = '{}/ngrams-{}-{}'.format(
-            self.database_url,
+
+        self.ngrams_index = 'ngrams-{}-{}-ngrams'.format(
             self.language,
             self.version
+        )
+
+        self.sources_index_url = '{}/{}'.format(
+            self.database_url,
+            self.sources_index
+        )
+
+        self.ngrams_index_url = '{}/{}'.format(
+            self.database_url,
+            self.ngrams_index
         )
 
         self.sources = NgramSources(self.language, self.version)
 
     def put_mappings(self):
-        resp = requests.get(self.index_url)
+        resp = requests.get(self.sources_index_url)
         if resp.status_code != requests.codes.ok:
-            resp = requests.put(self.index_url, data=self.mapping)
+            resp = requests.put(self.sources_index_url, data=self.sources_mapping)
         else:
-            if json.loads(self.mapping)['mappings'] != resp.json()['ngrams-{}-{}'.format(self.language, self.version)]['mappings']:
-                raise RuntimeError('Index at {} already exists and does not have correct mappings. Cannot continue.'.format(self.index_url))
+            if json.loads(self.sources_mapping)['mappings'] != resp.json()['ngrams-{}-{}-sources'.format(self.language, self.version)]['mappings']:
+                raise RuntimeError('Index at {} already exists and does not have correct mappings. Cannot continue.'.format(self.sources_index_url))
+
+        resp = requests.get(self.ngrams_index_url)
+        if resp.status_code != requests.codes.ok:
+            resp = requests.put(self.ngrams_index_url, data=self.ngrams_mapping)
+        else:
+            if json.loads(self.ngrams_mapping)['mappings'] != resp.json()['ngrams-{}-{}-ngrams'.format(self.language, self.version)]['mappings']:
+                raise RuntimeError('Index at {} already exists and does not have correct mappings. Cannot continue.'.format(self.ngrams_index_url))
 
     def get_totals(self):
         totals = self.sources.get_totals()
@@ -170,16 +192,13 @@ class ElasticUtility(object):
         for total in totals:
             create_string = {
                 "index": {
-                    "_index": "{}".format(self.index),
+                    "_index": "{}".format(self.sources_index),
                     "_type": "total",
                     "_id": "{}".format(total['year'])
                 }
             }
             bulk_string.append(json.dumps(create_string).replace('\n', ' '))
             bulk_string.append(json.dumps(total, ensure_ascii=False).replace('\n', ' '))
-            # resp = requests.put('{}/total/{}'.format(self.index_url, total['year']), data=json.dumps(total))
-            # if resp.status_code not in {requests.codes.created, requests.codes.ok}:
-            #     print(resp.status_code, resp.text)
 
         bulk_string.append(' ')
         bulk_string = bytearray('\n'.join(bulk_string), 'utf-8')
@@ -188,7 +207,7 @@ class ElasticUtility(object):
             print(resp.status_code, resp.text)
 
         time.sleep(2)
-        totals_count = requests.get('{}/total/_count'.format(self.index_url))
+        totals_count = requests.get('{}/total/_count'.format(self.sources_index_url))
         totals_count = totals_count.json()['count']
 
         if totals_count != len(totals):
@@ -209,9 +228,12 @@ class ElasticUtility(object):
                 time.sleep(1)
                 continue
 
+            if size_data['size'] < 51200:
+                continue
+
             create_string = {
                 "index": {
-                    "_index": "{}".format(self.index),
+                    "_index": "{}".format(self.sources_index),
                     "_type": "source",
                     "_id": "{}gram-{}".format(size_data['ngram'], size_data['letters'])
                 }
@@ -239,7 +261,7 @@ class ElasticUtility(object):
             bulk_string = []
 
         time.sleep(2)
-        sources_count = requests.get('{}/source/_count'.format(self.index_url))
+        sources_count = requests.get('{}/source/_count'.format(self.sources_index_url))
         sources_count = sources_count.json()['count']
 
         if sources_count != total_sources:
@@ -277,19 +299,27 @@ class ElasticInterface(ElasticUtility):
             }
         }
         unprocessed_count = requests.post(
-            '{}/source/_count'.format(self.index_url),
+            '{}/source/_count'.format(self.sources_index_url),
             data=json.dumps(unprocessed_query)
         )
         unprocessed_count = unprocessed_count.json()['count']
 
         unprocessed_query['size'] = unprocessed_count
-        unprocessed_sources = requests.post(
-            '{}/source/_search'.format(self.index_url),
+        unprocessed_sources_raw = requests.post(
+            '{}/source/_search'.format(self.sources_index_url),
             data=json.dumps(unprocessed_query)
-        )
+        ).json()['hits']['hits']
 
-        unprocessed_sources = deque(unprocessed_sources.json()['hits']['hits'])
-        random.shuffle(unprocessed_sources)
+        unprocessed_sources = deque()
+        curr_time = time.time()
+        for source in unprocessed_sources_raw:
+            if 'last_processed' in source['_source']:
+                if curr_time - source['_source']['last_processed'] > 600:
+                    unprocessed_sources.append(source)
+            else:
+                unprocessed_sources.append(source)
+
+        # random.shuffle(unprocessed_sources)
 
         self.unprocessed_sources = unprocessed_sources
 
@@ -300,7 +330,7 @@ class ElasticInterface(ElasticUtility):
         self.downloaded_ngrams = deque()
         self._update_unprocessed()
 
-        for i in range(1):
+        for i in range(2):
             self.stream_threads.append(
                 threading.Thread(target=self._download_thread, args=(i,))
             )
@@ -314,10 +344,23 @@ class ElasticInterface(ElasticUtility):
                 threading.Thread(target=self._upload_thread)
             )
             self.upload_threads[-1].start()
-            time.sleep(10)
+            time.sleep(15)
 
         for thread in self.upload_threads:
             thread.join()
+
+    def ngram_id(self, n, letters, full_ngram):
+        ngram_hash = ''
+        for tok in full_ngram.split():
+            ngram_hash += hex(ord(tok[0]))[2:].rjust(3, '0')[:3]
+        ngram_hash = ngram_hash.rjust(15, '0')
+
+        return '{}-{}-{}-{}'.format(
+            n,
+            bytes(letters, 'utf-8').hex()[:4].rjust(4, '0'),
+            ngram_hash,
+            base64.b64encode(hashlib.md5(bytes(full_ngram, 'utf-8')).digest()).decode('utf-8')[:16]
+        )
 
     def _upload_thread(self):
         bulk_string = deque()
@@ -325,15 +368,14 @@ class ElasticInterface(ElasticUtility):
             if len(self.downloaded_ngrams) > 0:
                 try:
                     next_ngram = self.downloaded_ngrams.popleft()
-                    if len(self.downloaded_ngrams) > 5000:
-                        time.sleep((len(self.downloaded_ngrams)**2) * 0.0000003)
                 except IndexError:
+                    # print('Index error...')
+                    time.sleep(0.1)
                     continue
 
-                create_string = '''{{"index": {{"_index": "{}","_type": "ngram","_id": "{}{}"}}}}'''.format(
-                    self.index,
-                    next_ngram['n'],
-                    hashlib.md5(bytes(next_ngram['ngram_full'], 'utf-8')).hexdigest()
+                create_string = '''{{"index": {{"_index": "{}","_type": "ngram","_id": "{}"}}}}'''.format(
+                    self.ngrams_index,
+                    self.ngram_id(next_ngram['n'], next_ngram['letters'], next_ngram['ngram_full'])
                 )
                 bulk_string.append(bytes(create_string, 'utf-8'))
                 bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
@@ -342,17 +384,19 @@ class ElasticInterface(ElasticUtility):
                 # if self.download_counter % 50000 == 0:
                 #     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
 
-                if (len(bulk_string)/2) % 7500 == 0 and len(bulk_string) > 0:
-                    print('Uploading {} on thread {} | {} in download queue'.format(int(len(bulk_string)/2), threading.get_ident(), len(self.downloaded_ngrams)))
+                if (len(bulk_string)/2) % 10000 == 0 and len(bulk_string) > 0:
                     # print('Total downloaded: {}'.format(self.download_counter))
                     # encoding_start = time.perf_counter()
                     bulk_string.append(b' ')
                     bulk_string = b'\n'.join(bulk_string)
+                    print('Uploading 10000 on thread {} | {} in download queue'.format(threading.get_ident(), len(self.downloaded_ngrams)))
                     # print('Finished encoding on thread {} in {}s'.format(threading.get_ident(), int(time.perf_counter() - encoding_start)))
-                    # upload_start = time.perf_counter()
+                    upload_start = time.perf_counter()
                     resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
                     if resp.status_code not in {requests.codes.created, requests.codes.ok}:
                         print(resp.status_code, resp.text)
+                    else:
+                        print('Uploaded 10000 on thread {} in {:.2f}s | {} in download queue'.format(threading.get_ident(), (time.perf_counter() - upload_start), len(self.downloaded_ngrams)))
                     # else:
                     #     print('Upload on thread {} completed in {}s'.format(threading.get_ident(), int(time.perf_counter() - upload_start)))
 
@@ -375,10 +419,19 @@ class ElasticInterface(ElasticUtility):
 
             if thread_index == 0:
                 self._update_unprocessed()
-                print('Shuffling unprocessed sources...')
+                # print('Shuffling unprocessed sources...')
 
             ngram_count = 0
             source = self.unprocessed_sources.pop()
+
+            updated_processed = requests.post(
+                '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
+                data=json.dumps({
+                    "doc": {
+                        "last_processed": int(time.time())
+                    }
+                })
+            )
 
             ngram_info = source['_source']
             print('Processing {}gram-{}...'.format(ngram_info['ngram'], ngram_info['letters']))
@@ -409,8 +462,17 @@ class ElasticInterface(ElasticUtility):
                         download_time = int(time.perf_counter() - start_time) + 0.00001
                         print('Downloaded {} ngrams from {}gram-{} at {}/sec | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time), len(self.downloaded_ngrams)))
 
+                        updated_processed = requests.post(
+                            '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
+                            data=json.dumps({
+                                "doc": {
+                                    "last_processed": int(time.time())
+                                }
+                            })
+                        )
+
                     if len(self.downloaded_ngrams) > 15000:
-                        time.sleep(len(self.downloaded_ngrams) * 0.0000001)
+                        time.sleep((len(self.downloaded_ngrams)**2) * 0.0000003)
 
                 next_ngram = next(stream)
 
@@ -419,7 +481,7 @@ class ElasticInterface(ElasticUtility):
                 download_time = int(time.perf_counter() - start_time) + 0.00001
                 print('Downloaded {} from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
                 mark_downloaded = requests.post(
-                    '{}/source/{}/_update'.format(self.index_url, source['_id']),
+                    '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
                     data=json.dumps({
                         "doc": {
                             "downloaded": "true",

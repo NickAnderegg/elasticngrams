@@ -346,12 +346,13 @@ class NgramStream(NgramBase):
                 if ngram_full != current_ngram_text:
                     if current_ngram != {}:
                         self.ngram_stream.appendleft(current_ngram)
-                        if len(self.ngram_stream) > 5000:
+                        if len(self.ngram_stream) > 15000:
                             time.sleep((len(self.ngram_stream)**2) * 0.0000003)
                     current_ngram_text = ngram_full
                     current_ngram = {
                         'n': len(ngram_split),
-                        'ngram_full': ngram_full
+                        'ngram_full': ngram_full,
+                        'letters': self.letters
                     }
 
                     if self.max_year:
