@@ -340,7 +340,7 @@ class ElasticInterface(ElasticUtility):
 
         self.download_counter = 0
         self.upload_threads = []
-        for i in range(3):
+        for i in range(2):
             self.upload_threads.append(
                 threading.Thread(target=self._upload_thread)
             )
