@@ -319,6 +319,7 @@ class ElasticInterface(ElasticUtility):
             else:
                 unprocessed_sources.append(source)
 
+        # unprocessed_sources = unprocessed_sources[:int(len(unprocessed_sources)/5)+1]
         # random.shuffle(unprocessed_sources)
 
         self.unprocessed_sources = unprocessed_sources
@@ -330,7 +331,7 @@ class ElasticInterface(ElasticUtility):
         self.downloaded_ngrams = deque()
         self._update_unprocessed()
 
-        for i in range(2):
+        for i in range(1):
             self.stream_threads.append(
                 threading.Thread(target=self._download_thread, args=(i,))
             )
@@ -384,19 +385,19 @@ class ElasticInterface(ElasticUtility):
                 # if self.download_counter % 50000 == 0:
                 #     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
 
-                if (len(bulk_string)/2) % 10000 == 0 and len(bulk_string) > 0:
+                if (len(bulk_string)/2) % 15000 == 0 and len(bulk_string) > 0:
                     # print('Total downloaded: {}'.format(self.download_counter))
                     # encoding_start = time.perf_counter()
                     bulk_string.append(b' ')
                     bulk_string = b'\n'.join(bulk_string)
-                    print('Uploading 10000 on thread {} | {} in download queue'.format(threading.get_ident(), len(self.downloaded_ngrams)))
+                    print('Uploading 15000 on thread {} | {} in download queue'.format(threading.get_ident(), len(self.downloaded_ngrams)))
                     # print('Finished encoding on thread {} in {}s'.format(threading.get_ident(), int(time.perf_counter() - encoding_start)))
                     upload_start = time.perf_counter()
                     resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
                     if resp.status_code not in {requests.codes.created, requests.codes.ok}:
                         print(resp.status_code, resp.text)
                     else:
-                        print('Uploaded 10000 on thread {} in {:.2f}s | {} in download queue'.format(threading.get_ident(), (time.perf_counter() - upload_start), len(self.downloaded_ngrams)))
+                        print('Uploaded 15000 on thread {} in {:.2f}s | {} in download queue'.format(threading.get_ident(), (time.perf_counter() - upload_start), len(self.downloaded_ngrams)))
                     # else:
                     #     print('Upload on thread {} completed in {}s'.format(threading.get_ident(), int(time.perf_counter() - upload_start)))
 

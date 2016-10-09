@@ -346,7 +346,7 @@ class NgramStream(NgramBase):
                 if ngram_full != current_ngram_text:
                     if current_ngram != {}:
                         self.ngram_stream.appendleft(current_ngram)
-                        if len(self.ngram_stream) > 15000:
+                        if len(self.ngram_stream) > 30000:
                             time.sleep((len(self.ngram_stream)**2) * 0.0000003)
                     current_ngram_text = ngram_full
                     current_ngram = {
