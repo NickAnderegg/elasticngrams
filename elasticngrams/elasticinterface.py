@@ -4,8 +4,11 @@ import time
 import threading
 import hashlib, base64
 import random
+import sys
+
 import queue
 from collections import deque
+
 from .ngramstream import NgramBase, NgramSources, NgramStream
 
 class ElasticUtility(object):
@@ -267,7 +270,7 @@ class ElasticUtility(object):
         if sources_count != total_sources:
             raise RuntimeError('Number of sources in database ({}) does not match total submitted ({})'.format(sources_count, total_sources))
 
-class ElasticInterface(ElasticUtility):
+class NgramDownloader(ElasticUtility):
     def __init__(self, database_url, language, version,
                 min_year=None, max_year=None, volume_count=True, aggregate_count=False,
                 partial_aggregate=None, agg_min_year=None, agg_max_year=None):
@@ -326,6 +329,9 @@ class ElasticInterface(ElasticUtility):
 
     def download_ngrams(self):
 
+        self.run_event = threading.Event()
+        self.run_event.set()
+
         self.stream_threads = []
         self.stream_count = 0
         self.downloaded_ngrams = deque()
@@ -338,17 +344,24 @@ class ElasticInterface(ElasticUtility):
             self.stream_threads[-1].start()
             time.sleep(0.1)
 
-        self.download_counter = 0
-        self.upload_threads = []
-        for i in range(2):
-            self.upload_threads.append(
-                threading.Thread(target=self._upload_thread)
-            )
-            self.upload_threads[-1].start()
-            time.sleep(15)
+        # self.download_counter = 0
+        try:
+            self.upload_threads = []
+            for i in range(2):
+                self.upload_threads.append(
+                    threading.Thread(target=self._upload_thread)
+                )
+                self.upload_threads[-1].start()
+                time.sleep(1)
 
-        for thread in self.upload_threads:
-            thread.join()
+            for thread in self.upload_threads:
+                thread.join()
+        except KeyboardInterrupt:
+            self.run_event.clear()
+            print('Attempting to close threads...')
+            for thread in self.upload_threads:
+                thread.join()
+            print('Shutdown successful!')
 
     def ngram_id(self, n, letters, full_ngram):
         ngram_hash = ''
@@ -365,7 +378,7 @@ class ElasticInterface(ElasticUtility):
 
     def _upload_thread(self):
         bulk_string = deque()
-        while self.stream_count > 0:
+        while self.stream_count > 0 and self.run_event.is_set():
             if len(self.downloaded_ngrams) > 0:
                 try:
                     next_ngram = self.downloaded_ngrams.popleft()
@@ -380,7 +393,7 @@ class ElasticInterface(ElasticUtility):
                 )
                 bulk_string.append(bytes(create_string, 'utf-8'))
                 bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
-                self.download_counter += 1
+                # self.download_counter += 1
 
                 # if self.download_counter % 50000 == 0:
                 #     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
@@ -405,25 +418,26 @@ class ElasticInterface(ElasticUtility):
 
                     bulk_string = deque()
 
-        bulk_string.append(' ')
-        bulk_string = bytearray('\n'.join(bulk_string), 'utf-8')
-        resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
-        if resp.status_code not in {requests.codes.created, requests.codes.ok}:
-            print(resp.status_code, resp.text)
+        if self.run_event.is_set():
+            bulk_string.append(' ')
+            bulk_string = bytearray('\n'.join(bulk_string), 'utf-8')
+            resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
+            if resp.status_code not in {requests.codes.created, requests.codes.ok}:
+                print(resp.status_code, resp.text)
 
         print('\n\nUpload thread {} is exiting...\n\n'.format(threading.get_ident()))
 
     def _download_thread(self, thread_index=0):
         self.stream_count += 1
-        while(len(self.unprocessed_sources) > 0):
+        while len(self.unprocessed_sources) > 0 and self.run_event.is_set():
             start_time = time.perf_counter()
 
-            if thread_index == 0:
-                self._update_unprocessed()
-                # print('Shuffling unprocessed sources...')
-
             ngram_count = 0
-            source = self.unprocessed_sources.pop()
+            self._update_unprocessed()
+            if len(self.unprocessed_sources) > 0:
+                source = self.unprocessed_sources.pop()
+            else:
+                continue
 
             updated_processed = requests.post(
                 '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
@@ -451,17 +465,22 @@ class ElasticInterface(ElasticUtility):
             )
 
             failure_signal = queue.Queue(maxsize=1)
-            stream.download(signal=failure_signal)
+            stream.download(signal=failure_signal, run_event=self.run_event)
 
+            download_time = time.perf_counter()
             next_ngram = next(stream)
-            while(stream.thread_live or next_ngram):
+            while stream.thread_live or next_ngram:
+                if not self.run_event.is_set():
+                    break
                 if next_ngram is not False:
                     self.downloaded_ngrams.append(next_ngram)
                     ngram_count += 1
 
                     if ngram_count % 10000 == 0:
-                        download_time = int(time.perf_counter() - start_time) + 0.00001
-                        print('Downloaded {} ngrams from {}gram-{} at {}/sec | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time), len(self.downloaded_ngrams)))
+                        download_time = max((time.perf_counter() - download_time), 1)
+                        avg_time = max(int(time.perf_counter() - start_time), 1)
+                        print('Downloaded {} ngrams from {}gram-{} in {:.1f} at {:.1f}/sec (avg. {:.1f}/sec) | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], download_time, (10000/download_time), (ngram_count/avg_time), len(self.downloaded_ngrams)))
+                        download_time = time.perf_counter()
 
                         updated_processed = requests.post(
                             '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
@@ -477,27 +496,154 @@ class ElasticInterface(ElasticUtility):
 
                 next_ngram = next(stream)
 
-            if failure_signal.empty():
-
-                download_time = int(time.perf_counter() - start_time) + 0.00001
-                print('Downloaded {} from {}gram-{} at {}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/download_time)))
+            if failure_signal.empty() and self.run_event.is_set():
+                avg_time = max(int(time.perf_counter() - start_time), 1)
+                print('Downloaded {} from {}gram-{} at {:.1f}/sec'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], (ngram_count/avg_time)))
                 mark_downloaded = requests.post(
                     '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
                     data=json.dumps({
                         "doc": {
                             "downloaded": "true",
                             "download_count": ngram_count,
-                            "download_duration": download_time
+                            "download_duration": avg_time,
+                            "line_count": stream.line_count,
+                            "extracted_count": stream.extracted_count
                         }
                     })
                 )
-            else:
+            elif self.run_event.is_set():
                 exc_type, exc_value, exc_traceback = failure_signal.get()
-                if exc_type is RuntimeError:
-                    print('Failure to download {}gram-{}:'.format(ngram_info['ngram'], ngram_info['letters']))
-                    print('\t - RuntimeError: {}'.format(exc_value))
+                print('Failure to download {}gram-{}:'.format(ngram_info['ngram'], ngram_info['letters']))
+                print('\t - Exception: {}'.format(exc_value))
+                print('\t - Message: {}'.format(exc_type))
+                print('\t - Traceback: {}'.format(exc_traceback))
+            else:
+                stream.download_thread.join()
 
             ngram_count = 0
 
+        print('\n\nDownload thread {} is exiting...\n\n'.format(threading.get_ident()))
         self.stream_count -= 1
         return
+
+class SourceInterface(ElasticUtility):
+    def __init__(self, database_url, language, version):
+        import numpy as np
+        import scipy.stats as stats
+        import math
+
+        ElasticUtility.__init__(self, database_url, language, version)
+
+    def get_sources(self):
+        query_all_sources = '''
+            {
+                "sort": {"size": {"order": "asc"} },
+                "size": 10000,
+                "query": {
+                    "match_all": {}
+                }
+            }
+        '''
+        resp = requests.post(
+            '{}/source/_search'.format(self.sources_index_url),
+            data=query_all_sources
+        )
+
+        if resp.status_code != requests.codes.ok:
+            print(resp.request.body)
+            raise RuntimeError('Ngram sources response failed: response code {}'.format(resp.status_code))
+
+        resp_all_sources = resp.json()['hits']['hits']
+
+        sources = dict()
+        for source in resp_all_sources:
+            source_id = source['_id']
+            source = source['_source']
+            sources[source_id] = {}
+            keys = (
+                'ngram', 'letters', 'size',
+                'downloaded', 'download_duration', 'download_count',
+                'prev_ratio'
+            )
+
+            for key in keys:
+                if key in source:
+                    # if key == 'download_duration':
+                    #     sources[source_id][key] = int(source[key])
+                    if key == 'downloaded':
+                        sources[source_id][key] = bool(source[key])
+                    else:
+                        sources[source_id][key] = source[key]
+                elif key == 'downloaded':
+                    sources[source_id]['downloaded'] = False
+
+        return sources
+
+    def get_ratio_outliers(self):
+        sources = self.get_sources()
+        rgb = ['#4286f4', '#f442ee', '#f44242', '#f4eb42', '#42f450']
+        population = [[],[],[],[],[]]
+        source_ratio = [[],[],[],[],[]]
+        for key, value in sources.items():
+            if value['downloaded'] and value['size'] > 1048576:
+                ratio = value['size']/value['download_count']
+                source_ratio[value['ngram']-1].append((ratio, key))
+                if ratio < 400:
+                    population[value['ngram']-1].append(ratio)
+
+        out_pop = []
+        for ix, row in enumerate(source_ratio):
+            # print('{}gram:'.format(ix+1))
+            pop_mean, pop_std = stats.hmean(population[ix]), np.std(population[ix])
+            # print('Mean:', pop_mean, 'STD:', pop_std)
+
+            for ratio, key in row:
+                if 'prev_ratio' in sources[key]:
+                    ratio_diff = min(ratio, sources[key]['prev_ratio'])/max(ratio, sources[key]['prev_ratio'])
+                    if ratio_diff > 0.95:
+                        continue
+
+                if (pop_mean - (pop_std * 5)) < ratio < (pop_mean + (pop_std * 5)):
+                    continue
+
+                statistic, pvalue = stats.ttest_ind_from_stats(
+                    pop_mean, pop_std, len(population),
+                    ratio, 0, 1
+                )
+
+                if pvalue < 0.10:
+                    # out_pop.append(('Out of pop:', key, 'Value:', str(ratio), 'T=', str(statistic), 'p=', str(pvalue)))
+                    # print(' '.join(out_pop[-1]))
+                    out_pop.append((key, ratio))
+
+        return out_pop
+
+    def void_ratio_outliers(self):
+        outliers = self.get_ratio_outliers()
+
+        for outlier in outliers:
+            key, ratio = outlier
+
+            update_script = json.dumps({
+                'script': '{}'.format(' '.join([
+                    'ctx._source.remove(\"downloaded\");',
+                    'ctx._source.remove(\"download_duration\");',
+                    'ctx._source.remove(\"download_count\");',
+                    'ctx._source.remove(\"last_processed\");',
+                    'ctx._source.prev_ratio = {:.2f};'.format(ratio)
+                ]))
+            })
+
+            update = requests.post(
+                '{}/source/{}/_update'.format(self.sources_index_url, key),
+                data=update_script
+            )
+
+            # print(update.request.url)
+            # print(update.request.body)
+            # print(update.json())
+
+
+class NgramInterface(ElasticUtility):
+    def __init__(self):
+        pass

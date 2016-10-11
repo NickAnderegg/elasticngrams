@@ -235,6 +235,8 @@ class NgramStream(NgramBase):
 
         self.ngram_stream = deque()
         self.failure_signal = None
+        self.line_count = 0
+        self.extracted_count = 0
 
     def _generate_url(self):
 
@@ -255,8 +257,9 @@ class NgramStream(NgramBase):
     def __len__(self):
         return len(self.ngram_stream)
 
-    def download(self, signal=None):
+    def download(self, signal, run_event):
         self.failure_signal = signal
+        self.run_event = run_event
         self.download_thread = threading.Thread(target=self._download_thread)
         self.download_thread.start()
 
@@ -277,6 +280,7 @@ class NgramStream(NgramBase):
                 else:
                     if self.failure_signal is not None:
                         self.failure_signal.put(sys.exc_info())
+                        print('Exiting NgramStream thread with exception!')
                         self.thread_live = False
                         return False
                     else:
@@ -300,9 +304,8 @@ class NgramStream(NgramBase):
             try:
                 line = self.zipped.readline()
             except OSError:
-                # print('Skipped {}'.format(self.resource_url))
-                # file_loc = pathlib.Path('downloaded/{}grams/condensed-{}.csv'.format(xgram,file_ref))
-                # file_loc.touch()
+                self.failure_signal.put(sys.exc_info())
+                print('Exiting NgramStream thread with exception!')
                 self.thread_live = False
                 return
 
@@ -313,16 +316,17 @@ class NgramStream(NgramBase):
             current_ngram_text = ''
             current_ngram = {}
 
-            line_no     = 0
+            self.line_count      = 0
+            self.extracted_count = 0
             added       = 0
             chunk       = 0
-            while line:
-                line_no += 1
+            while line and self.run_event.is_set():
+                self.line_count += 1
 
-                if line_no % 1000000 == 0:
+                if self.line_count % 1000000 == 0:
                     curr = time.perf_counter() - timestamp
                     total_time += curr
-                    print('Extracted {} lines in {:.2f}s ({}/s) | Processed: {} lines in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), line_no, total_time, int(line_no/total_time)))
+                    print('Extracted {} lines in {:.2f}s ({}/s) | Processed: {} lines in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), self.line_count, total_time, int(self.line_count/total_time)))
                     timestamp = time.perf_counter()
                     chunk = 0
 
@@ -341,6 +345,7 @@ class NgramStream(NgramBase):
                 ngram_count = int(line_full[2])
                 ngram_vols  = int(line_full[3])
 
+                self.extracted_count += 1
                 chunk += 1
                 added += 1
                 if ngram_full != current_ngram_text:
@@ -410,14 +415,14 @@ class NgramStream(NgramBase):
         self.thread_live = False
         return
 
-                # if line_no % 100000 == 0:
+                # if self.line_count % 100000 == 0:
                 #     print(json.dumps(self.next_ngram(),indent=2))
-                # if line_no > 10000:
+                # if self.line_count > 10000:
                 #     return
 
-                # if line_no % 1000000 == 0:
+                # if self.line_count % 1000000 == 0:
                 #     curr = time.perf_counter() - timestamp
                 #     total_time += curr
-                #     print('Extracted {} in {:.2f}s ({}/s) | Processed: {} in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), line_no, total_time, int(line_no/total_time)))
+                #     print('Extracted {} in {:.2f}s ({}/s) | Processed: {} in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), self.line_count, total_time, int(self.line_count/total_time)))
                 #     timestamp = time.perf_counter()
                 #     chunk = 0
