@@ -622,9 +622,6 @@ class NgramDownloader(ElasticUtility):
                             "md5_official": stream.download_buffer.md5hash,
                             "md5_download_write": stream.download_buffer.write_hash_md5.hexdigest(),
                             "md5_download_read": stream.download_buffer.read_hash_md5.hexdigest(),
-                            "crc32_official": stream.download_buffer.crc32hash,
-                            "crc32_download_write": '{:x}'.format(stream.download_buffer.write_hash_crc32),
-                            "crc32_download_read": '{:x}'.format(stream.download_buffer.read_hash_crc32),
                             "decompressed_size": stream.decompressed_bytes,
                             "processor_version": "1.1.0",
                             "added": int(time.time())
