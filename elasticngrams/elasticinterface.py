@@ -291,6 +291,27 @@ class NgramDownloader(ElasticUtility):
         self.get_sizes()
 
     def _update_unprocessed(self):
+        # self.unprocessed_sources = deque()
+        # self.unprocessed_sources.append({
+        #     "_index": "ngrams-chi-sim-all-20120701-sources",
+        #     "_type": "source",
+        #     "_id": "5gram-an",
+        #     "_score": None,
+        #     "_source": {
+        #     "url": "http://storage.googleapis.com/books/ngrams/books/googlebooks-chi-sim-all-5gram-20120701-an.gz",
+        #     "ngram": 5,
+        #     "size": 137458917,
+        #     "letters": "an",
+        #     "last_processed": 1475984648,
+        #     "download_duration": 1658.00001,
+        #     "downloaded": "true",
+        #     "download_count": 1276003
+        #     },
+        #     "sort": [
+        #       137458917
+        #     ]
+        # })
+        # return
         unprocessed_query = {
             "sort": {"size": {"order": "desc"} },
             "query": {
@@ -334,34 +355,52 @@ class NgramDownloader(ElasticUtility):
 
         self.stream_threads = []
         self.stream_count = 0
-        self.downloaded_ngrams = deque()
+        # self.downloaded_ngrams = deque()
+        self.downloaded_batches = deque()
+        self.downloaded_count = 0
+
+        self.batch_size = 25000
+
+        self.upload_threads = 0
+        self.upload_numbers = deque([str(x) for x in range(20, 0, -1)])
+
         self._update_unprocessed()
 
-        for i in range(1):
-            self.stream_threads.append(
-                threading.Thread(target=self._download_thread, args=(i,))
-            )
-            self.stream_threads[-1].start()
-            time.sleep(0.1)
-
-        # self.download_counter = 0
         try:
-            self.upload_threads = []
-            for i in range(2):
-                self.upload_threads.append(
-                    threading.Thread(target=self._upload_thread)
+            for i in range(1):
+                self.stream_threads.append(
+                    threading.Thread(target=self._download_thread, args=(i,))
                 )
-                self.upload_threads[-1].start()
-                time.sleep(1)
+                self.stream_threads[-1].start()
+                time.sleep(0.1)
 
-            for thread in self.upload_threads:
+            for thread in self.stream_threads:
                 thread.join()
         except KeyboardInterrupt:
             self.run_event.clear()
             print('Attempting to close threads...')
-            for thread in self.upload_threads:
+            for thread in self.stream_threads:
                 thread.join()
             print('Shutdown successful!')
+
+        # self.download_counter = 0
+        # try:
+            # self.upload_threads = []
+            # for i in range(2):
+            #     self.upload_threads.append(
+            #         threading.Thread(target=self._upload_thread)
+            #     )
+            #     self.upload_threads[-1].start()
+            #     time.sleep(1)
+            #
+            # for thread in self.upload_threads:
+            #     thread.join()
+        # except KeyboardInterrupt:
+        #     self.run_event.clear()
+        #     print('Attempting to close threads...')
+        #     for thread in self.upload_threads:
+        #         thread.join()
+        #     print('Shutdown successful!')
 
     def ngram_id(self, n, letters, full_ngram):
         ngram_hash = ''
@@ -376,61 +415,101 @@ class NgramDownloader(ElasticUtility):
             base64.b64encode(hashlib.md5(bytes(full_ngram, 'utf-8')).digest()).decode('utf-8')[:16]
         )
 
-    def _upload_thread(self):
+    def _upload_thread(self, next_batch):
+        self.upload_threads += 1
         bulk_string = deque()
-        while self.stream_count > 0 and self.run_event.is_set():
-            if len(self.downloaded_ngrams) > 0:
-                try:
-                    next_ngram = self.downloaded_ngrams.popleft()
-                except IndexError:
-                    # print('Index error...')
-                    time.sleep(0.1)
-                    continue
+        batch_length = len(next_batch)
 
-                create_string = '''{{"index": {{"_index": "{}","_type": "ngram","_id": "{}"}}}}'''.format(
-                    self.ngrams_index,
-                    self.ngram_id(next_ngram['n'], next_ngram['letters'], next_ngram['ngram_full'])
-                )
-                bulk_string.append(bytes(create_string, 'utf-8'))
-                bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
-                # self.download_counter += 1
+        while len(next_batch) > 0 and self.run_event.is_set():
+            next_ngram = next_batch.popleft()
+            next_ngram['added'] = int(time.time())
+            next_ngram['processor_version'] = '1.1.0'
 
-                # if self.download_counter % 50000 == 0:
-                #     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
+            create_string = '''{{"index": {{"_index": "{}","_type": "ngram","_id": "{}"}}}}'''.format(
+                self.ngrams_index,
+                self.ngram_id(next_ngram['n'], next_ngram['letters'], next_ngram['ngram_full'])
+            )
+            bulk_string.append(bytes(create_string, 'utf-8'))
+            bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
 
-                if (len(bulk_string)/2) % 15000 == 0 and len(bulk_string) > 0:
-                    # print('Total downloaded: {}'.format(self.download_counter))
-                    # encoding_start = time.perf_counter()
-                    bulk_string.append(b' ')
-                    bulk_string = b'\n'.join(bulk_string)
-                    print('Uploading 15000 on thread {} | {} in download queue'.format(threading.get_ident(), len(self.downloaded_ngrams)))
-                    # print('Finished encoding on thread {} in {}s'.format(threading.get_ident(), int(time.perf_counter() - encoding_start)))
-                    upload_start = time.perf_counter()
-                    resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
-                    if resp.status_code not in {requests.codes.created, requests.codes.ok}:
-                        print(resp.status_code, resp.text)
-                    else:
-                        print('Uploaded 15000 on thread {} in {:.2f}s | {} in download queue'.format(threading.get_ident(), (time.perf_counter() - upload_start), len(self.downloaded_ngrams)))
-                    # else:
-                    #     print('Upload on thread {} completed in {}s'.format(threading.get_ident(), int(time.perf_counter() - upload_start)))
+        bulk_string.append(b' ')
+        bulk_string = b'\n'.join(bulk_string)
+        print('Uploading {} on thread Upload-{} ({} running) | {} in upload queue'.format(batch_length, threading.current_thread().name, self.upload_threads, self.downloaded_count))#len(self.downloaded_ngrams)))
+        # print('Finished encoding on thread {} in {}s'.format(threading.get_ident(), int(time.perf_counter() - encoding_start)))
+        upload_start = time.perf_counter()
+        resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
+        if resp.status_code not in {requests.codes.created, requests.codes.ok}:
+            print(resp.status_code, resp.text)
+        else:
+            self.downloaded_count -= batch_length
+            # print('Uploaded {} on thread {} in {:.2f}s | {} in download queue'.format(batch_length, threading.current_thread().name, (time.perf_counter() - upload_start), self.downloaded_count))#len(self.downloaded_ngrams)))
+            # print('Live upload threads: {}'.format(self.upload_threads))
+        self.upload_threads -= 1
+        self.upload_numbers.append(threading.current_thread().name)
+        self.upload_numbers = sorted(self.upload_numbers, reverse=True)
 
-                    # print("{} threads running".format(threading.active_count()))
-
-                    bulk_string = deque()
-
-        if self.run_event.is_set():
-            bulk_string.append(' ')
-            bulk_string = bytearray('\n'.join(bulk_string), 'utf-8')
-            resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
-            if resp.status_code not in {requests.codes.created, requests.codes.ok}:
-                print(resp.status_code, resp.text)
-
-        print('\n\nUpload thread {} is exiting...\n\n'.format(threading.get_ident()))
+    # def _upload_thread(self):
+    #     bulk_string = deque()
+    #     while self.stream_count > 0 and self.run_event.is_set():
+    #         if len(self.downloaded_batches) > 0:
+    #             try:
+    #                 # next_ngram = self.downloaded_ngrams.popleft()
+    #                 next_batch = self.downloaded_batches.popleft()
+    #             except IndexError:
+    #                 # print('Index error...')
+    #                 time.sleep(0.1)
+    #                 continue
+    #
+    #             while len(next_batch) > 0:
+    #                 next_ngram = next_batch.popleft()
+    #
+    #                 create_string = '''{{"index": {{"_index": "{}","_type": "ngram","_id": "{}"}}}}'''.format(
+    #                     self.ngrams_index,
+    #                     self.ngram_id(next_ngram['n'], next_ngram['letters'], next_ngram['ngram_full'])
+    #                 )
+    #                 bulk_string.append(bytes(create_string, 'utf-8'))
+    #                 bulk_string.append(bytes(json.dumps(next_ngram, ensure_ascii=False).replace('\n', ' '), 'utf-8'))
+    #                 # self.download_counter += 1
+    #
+    #                 # if self.download_counter % 50000 == 0:
+    #                 #     print('Upload thread download counter: {} ngrams'.format(self.download_counter))
+    #
+    #                 # if (len(bulk_string)/2) % 15000 == 0 and len(bulk_string) > 0:
+    #                     # print('Total downloaded: {}'.format(self.download_counter))
+    #                     # encoding_start = time.perf_counter()
+    #             bulk_string.append(b' ')
+    #             bulk_string = b'\n'.join(bulk_string)
+    #             print('Uploading 15000 on thread {} | {} in download queue'.format(threading.get_ident(), self.downloaded_count))#len(self.downloaded_ngrams)))
+    #             # print('Finished encoding on thread {} in {}s'.format(threading.get_ident(), int(time.perf_counter() - encoding_start)))
+    #             upload_start = time.perf_counter()
+    #             resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
+    #             if resp.status_code not in {requests.codes.created, requests.codes.ok}:
+    #                 print(resp.status_code, resp.text)
+    #             else:
+    #                 print('Uploaded 15000 on thread {} in {:.2f}s | {} in download queue'.format(threading.get_ident(), (time.perf_counter() - upload_start), self.downloaded_count))#len(self.downloaded_ngrams)))
+    #                 self.downloaded_count -= 15000
+    #             # else:
+    #             #     print('Upload on thread {} completed in {}s'.format(threading.get_ident(), int(time.perf_counter() - upload_start)))
+    #
+    #             # print("{} threads running".format(threading.active_count()))
+    #
+    #             bulk_string = deque()
+    #
+    #         else:
+    #             time.sleep(1)
+    #
+    #     if self.run_event.is_set():
+    #         bulk_string.append(' ')
+    #         bulk_string = bytearray('\n'.join(bulk_string), 'utf-8')
+    #         resp = requests.post('{}/_bulk'.format(self.database_url), data=bulk_string)
+    #         if resp.status_code not in {requests.codes.created, requests.codes.ok}:
+    #             print(resp.status_code, resp.text)
+    #
+    #     print('\n\nUpload thread {} is exiting...\n\n'.format(threading.get_ident()))
 
     def _download_thread(self, thread_index=0):
         self.stream_count += 1
         while len(self.unprocessed_sources) > 0 and self.run_event.is_set():
-            start_time = time.perf_counter()
 
             ngram_count = 0
             self._update_unprocessed()
@@ -449,7 +528,7 @@ class NgramDownloader(ElasticUtility):
             )
 
             ngram_info = source['_source']
-            print('Processing {}gram-{}...'.format(ngram_info['ngram'], ngram_info['letters']))
+            print('\n\nProcessing {}gram-{}...\n\n'.format(ngram_info['ngram'], ngram_info['letters']))
             stream = NgramStream(
                 ngram       = ngram_info['ngram'],
                 letters     = ngram_info['letters'],
@@ -465,36 +544,66 @@ class NgramDownloader(ElasticUtility):
             )
 
             failure_signal = queue.Queue(maxsize=1)
-            stream.download(signal=failure_signal, run_event=self.run_event)
+            # ngram_queue = stream.download(signal=failure_signal, run_event=self.run_event)
+            stream.download(signal=failure_signal, run_event=self.run_event, batch_size=self.batch_size)
 
+            downloaded_batch = deque()
+
+            start_time = time.perf_counter()
             download_time = time.perf_counter()
-            next_ngram = next(stream)
-            while stream.thread_live or next_ngram:
+            # next_ngram = next(stream)
+            # next_ngram = False
+            ngram_batch = False
+            while stream.thread_live or ngram_batch or len(stream) > 0:
+
                 if not self.run_event.is_set():
                     break
-                if next_ngram is not False:
-                    self.downloaded_ngrams.append(next_ngram)
-                    ngram_count += 1
+                # if next_ngram:
+                if ngram_batch is False:
+                    time.sleep(0.25)
+                else:
+                    batch_length = len(ngram_batch)
+                    # while len(ngram_batch) > 0:
+                    #     next_ngram = ngram_batch.pop()
+                    #     # self.downloaded_ngrams.append(next_ngram)
+                    #     downloaded_batch.append(next_ngram)
+                    self.downloaded_count += len(ngram_batch)
+                    ngram_count += len(ngram_batch)
 
-                    if ngram_count % 10000 == 0:
-                        download_time = max((time.perf_counter() - download_time), 1)
-                        avg_time = max(int(time.perf_counter() - start_time), 1)
-                        print('Downloaded {} ngrams from {}gram-{} in {:.1f} at {:.1f}/sec (avg. {:.1f}/sec) | {} in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], download_time, (10000/download_time), (ngram_count/avg_time), len(self.downloaded_ngrams)))
-                        download_time = time.perf_counter()
+                    # if ngram_count % 10000 == 0:
+                    download_time = max((time.perf_counter() - download_time), 0.00001)
+                    avg_time = max(int(time.perf_counter() - start_time), 0.00001)
+                    print('Downloaded {} from {}gram-{} in {:.5f} at {:.1f}/sec (avg. {:.1f}/sec) | {} batches in download queue'.format(ngram_count, ngram_info['ngram'], ngram_info['letters'], download_time, (batch_length/download_time), (ngram_count/avg_time), len(stream)))#len(self.downloaded_ngrams)))
+                    download_time = time.perf_counter()
+                    # self.downloaded_ngrams.append(downloaded_batch)
+                    # self.downloaded_batches.append(downloaded_batch)
+                    # self.upload_threads += 1
+                    while len(self.upload_numbers) <= 0:
+                        time.sleep(0.1)
+                    threading.Thread(target=self._upload_thread, name=self.upload_numbers.pop(), args=(ngram_batch.copy(),)).start()
+                    # self.downloaded_count -= len(downloaded_batch)
+                        # print('Length of queue:', len(stream))
 
-                        updated_processed = requests.post(
-                            '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
-                            data=json.dumps({
-                                "doc": {
-                                    "last_processed": int(time.time())
-                                }
-                            })
-                        )
+                    updated_processed = requests.post(
+                        '{}/source/{}/_update'.format(self.sources_index_url, source['_id']),
+                        data=json.dumps({
+                            "doc": {
+                                "last_processed": int(time.time())
+                            }
+                        })
+                    )
 
-                    if len(self.downloaded_ngrams) > 15000:
-                        time.sleep((len(self.downloaded_ngrams)**2) * 0.0000003)
+                    if self.downloaded_count > 50000:
+                        time.sleep(self.downloaded_count**1.2 * 0.00000001)
+                    # elif self.batch_size * len(stream) > 75000:
+                    #     time.sleep(self.batch_size * (len(stream)**2) * 0.0000003)
+                    # if self.downloaded_count > 60000:
+                    #     time.sleep(self.downloaded_count**2 * 0.0000003)
+                    # if len(self.downloaded_ngrams) > 15000:
+                    #     time.sleep((len(self.downloaded_ngrams)**2) * 0.0000003)
 
-                next_ngram = next(stream)
+                ngram_batch = next(stream)
+                # next_ngram = next(stream)
 
             if failure_signal.empty() and self.run_event.is_set():
                 avg_time = max(int(time.perf_counter() - start_time), 1)
@@ -507,7 +616,18 @@ class NgramDownloader(ElasticUtility):
                             "download_count": ngram_count,
                             "download_duration": avg_time,
                             "line_count": stream.line_count,
-                            "extracted_count": stream.extracted_count
+                            "stream_extracted_count": stream.extracted_count,
+                            "buffer_bytes_written": stream.download_buffer.written_bytes,
+                            "buffer_bytes_read": stream.download_buffer.read_bytes,
+                            "md5_official": stream.download_buffer.md5hash,
+                            "md5_download_write": stream.download_buffer.write_hash_md5.hexdigest(),
+                            "md5_download_read": stream.download_buffer.read_hash_md5.hexdigest(),
+                            "crc32_official": stream.download_buffer.crc32hash,
+                            "crc32_download_write": '{:x}'.format(stream.download_buffer.write_hash_crc32),
+                            "crc32_download_read": '{:x}'.format(stream.download_buffer.read_hash_crc32),
+                            "decompressed_size": stream.decompressed_bytes,
+                            "processor_version": "1.1.0",
+                            "added": int(time.time())
                         }
                     })
                 )
@@ -526,12 +646,12 @@ class NgramDownloader(ElasticUtility):
         self.stream_count -= 1
         return
 
+import numpy as np
+import scipy.stats as stats
+import math
+
 class SourceInterface(ElasticUtility):
     def __init__(self, database_url, language, version):
-        import numpy as np
-        import scipy.stats as stats
-        import math
-
         ElasticUtility.__init__(self, database_url, language, version)
 
     def get_sources(self):

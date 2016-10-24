@@ -12,6 +12,8 @@ import pathlib
 import csv
 import queue
 import sys
+import multiprocessing
+from downloadbuffer import DownloadBuffer
 
 class NgramBase(object):
     def __init__(self):
@@ -233,10 +235,17 @@ class NgramStream(NgramBase):
 
         self.resource_url = self._generate_url()
 
+        # self.ngram_stream = queue.Queue()
         self.ngram_stream = deque()
         self.failure_signal = None
         self.line_count = 0
         self.extracted_count = 0
+
+        self.pops_count = 0
+        self.pops_duration = 0
+        self.fails = 0
+
+        # self.download_buffer = None
 
     def _generate_url(self):
 
@@ -249,90 +258,153 @@ class NgramStream(NgramBase):
         )
 
     def __next__(self):
-        try:
+        if len(self) > 0:
             return self.ngram_stream.pop()
-        except IndexError:
+        else:
             return False
 
     def __len__(self):
         return len(self.ngram_stream)
+        # return self.ngram_stream.qsize()
 
-    def download(self, signal, run_event):
+    def download(self, signal, run_event, batch_size=500):
         self.failure_signal = signal
         self.run_event = run_event
-        self.download_thread = threading.Thread(target=self._download_thread)
+        self.download_thread = threading.Thread(target=self._download_thread, args=(batch_size,))
         self.download_thread.start()
 
-        return
+        return self.ngram_stream
 
-    def _download_thread(self):
+    def _download_thread(self, batch_size=500):
         self.thread_live = True
-        def next_line(retry_counter=0):
+        def next_line():
             try:
                 return self.zipped.readline()
             except ValueError:
                 self.thread_live = False
                 return False
-            except:
-                if retry_counter < 5:
-                    retry_counter += 1
-                    return next_line(retry_counter)
-                else:
-                    if self.failure_signal is not None:
-                        self.failure_signal.put(sys.exc_info())
-                        print('Exiting NgramStream thread with exception!')
-                        self.thread_live = False
-                        return False
-                    else:
-                        raise RuntimeError('Failed to get next line from ngram stream')
+            # except:
+            #     if retry_counter < 5:
+            #         retry_counter += 1
+            #         return next_line(retry_counter)
+            #     else:
+            #         if self.failure_signal is not None:
+            #             self.failure_signal.put(sys.exc_info())
+            #             print('Exiting NgramStream thread with exception!')
+            #             self.thread_live = False
+            #             return False
+            #         else:
+            #             raise RuntimeError('Failed to get next line from ngram stream')
 
-        with closing(requests.get(self.resource_url, stream=True)) as r:
+        self.download_buffer = DownloadBuffer(self.resource_url, max_size=1024**3)
+        self.download_buffer.start(chunk_size=1024*256)
 
-            resource_size = int(r.headers['content-length'])
-            if  resource_size == 0:
-                print('No such resource: {}'.format(self.resource_url))
-                self.thread_live = False
-                return
+        resource_size = self.download_buffer.content_length
+        if  resource_size == 0:
+            print('No such resource: {}'.format(self.resource_url))
+            self.thread_live = False
+            return
 
-            file_buffer = 65536
-            if resource_size <= file_buffer:
-                file_buffer = int(resource_size / 2)
+        # file_buffer = io.DEFAULT_BUFFER_SIZE
+        # if resource_size <= file_buffer:
+        #     file_buffer = int(resource_size / 2)
 
-            self.buff = io.BufferedReader(r.raw, buffer_size=file_buffer)
-            self.zipped = gzip.GzipFile(mode='rb', fileobj=self.buff)
+        # self.buff = io.BufferedReader(r.raw, buffer_size=file_buffer)
+        # self.buff = r.raw
+        # self.buff = io.BufferedReader(self.download_buffer)
+        self.zipped = gzip.GzipFile(mode='rb', fileobj=self.download_buffer)
+
+        # for i in range(100):
+        #     print(self.zipped.readline())
+
+        try:
+            line = self.zipped.readline()
+        except OSError:
+            self.failure_signal.put(sys.exc_info())
+            print('Exiting NgramStream thread with OSError!')
+            self.thread_live = False
+            return
+
+        timestamp = time.perf_counter()
+        total_time = 0
+
+        # extracted_ngrams = []
+        current_ngram_text = ''
+        current_ngram = {}
+
+        self.line_count      = 0
+        self.decompressed_bytes = 0
+        self.extracted_count = 0
+        added       = 0
+        chunk       = 0
+
+        ngram_batch = deque()
+
+        total_pushes = 0
+        push_duration = 0
+        while line and self.run_event.is_set():
+            self.line_count += 1
+
+            if self.line_count % 5000000 == 0:
+                curr = time.perf_counter() - timestamp
+                total_time += curr
+                print('Extracted {} lines ({} ngrams) from {}gram-{} in {:.2f}s ({}/s) | Processed: {} lines in {:.1f}s ({}/s)'.format(chunk, self.extracted_count, self.ngram, self.letters, curr, int(chunk/curr), self.line_count, total_time, int(self.line_count/total_time)))
+                print('Currently ~{} ngrams waiting for read in NgramStream queue'.format(batch_size * len(self.ngram_stream)))
+                down_speed = self.download_buffer.download_speed()
+                print(
+                    # '\n----------',
+                    '\nFile size: {}\tProgress:{:.2f}%\tEst: {:0>2d}h{:0>2d}m{:0>2d}s remaining'.format(
+                        self.download_buffer.unitizer(self.download_buffer.content_length, 'B', True),
+                        self.download_buffer.download_bytes/self.download_buffer.content_length*100,
+                        int((self.download_buffer.content_length-self.download_buffer.download_bytes) / down_speed / 3600) if down_speed > 0 else 0,
+                        int((self.download_buffer.content_length-self.download_buffer.download_bytes) / down_speed % 3600 / 60) if down_speed > 0 else 0,
+                        int((self.download_buffer.content_length-self.download_buffer.download_bytes) / down_speed % 60) if down_speed > 0 else 0
+                    ),
+                    '\nDown speed:',
+                    self.download_buffer.unitizer(self.download_buffer.download_speed(), 'b', True),
+                    'Bytes downloaded:',
+                    self.download_buffer.unitizer(self.download_buffer.download_bytes, 'B', True),
+                    '\nRead speed: ',
+                    self.download_buffer.unitizer(self.download_buffer.read_speed(), 'b', True),
+                    'Bytes read:',
+                    self.download_buffer.unitizer(self.download_buffer.read_bytes, 'B', True),
+                    '\nRead progress: {:.2f}%'.format(self.download_buffer.read_bytes/self.download_buffer.content_length*100),
+                    'Est: {:0>2d}h{:0>2d}m{:0>2d}s remaining: '.format(
+                        int((self.download_buffer.content_length-self.download_buffer.read_bytes) / (self.download_buffer.read_bytes/total_time) / 3600),
+                        int((self.download_buffer.content_length-self.download_buffer.read_bytes) / (self.download_buffer.read_bytes/total_time) % 3600 / 60),
+                        int((self.download_buffer.content_length-self.download_buffer.read_bytes) / (self.download_buffer.read_bytes/total_time) % 60)
+                    ),
+                    '\nDecompress speed:',
+                    self.download_buffer.unitizer((self.decompressed_bytes/total_time), 'b', True),
+                    'Bytes decompressed:',
+                    self.download_buffer.unitizer(self.decompressed_bytes, 'B', True),
+                    '\nWrite speed: ',
+                    self.download_buffer.unitizer(self.download_buffer.write_speed(), 'b', True),
+                    'Bytes written:',
+                    self.download_buffer.unitizer(self.download_buffer.written_bytes, 'B', True),
+                    # '\nBuffer volume:',
+                    # self.download_buffer.unitizer(len(self.download_buffer), 'B', True),
+                    # 'Buffer capacity:',
+                    # self.download_buffer.unitizer(self.download_buffer.capacity(), 'B', True),
+                    # 'Bytes sequential:',
+                    # self.download_buffer.unitizer(self.download_buffer.sequential_capacity(), 'B', True),
+                    '\n'# + line.decode('utf-8'),
+                    # '\n----------\n'
+                )
+                # print((self.pops_count/self.pops_duration), 'pops/s; fails:', self.fails)
+                timestamp = time.perf_counter()
+                chunk = 0
 
             try:
-                line = self.zipped.readline()
-            except OSError:
-                self.failure_signal.put(sys.exc_info())
-                print('Exiting NgramStream thread with exception!')
-                self.thread_live = False
-                return
+                self.decompressed_bytes += len(line)
+                line_full = line.decode('utf-8').split('\t')
+            except UnicodeDecodeError:
+                line = next_line()
+                continue
+                # raise
 
-            timestamp = time.perf_counter()
-            total_time = 0
-
-            # extracted_ngrams = []
-            current_ngram_text = ''
-            current_ngram = {}
-
-            self.line_count      = 0
-            self.extracted_count = 0
-            added       = 0
-            chunk       = 0
-            while line and self.run_event.is_set():
-                self.line_count += 1
-
-                if self.line_count % 1000000 == 0:
-                    curr = time.perf_counter() - timestamp
-                    total_time += curr
-                    print('Extracted {} lines in {:.2f}s ({}/s) | Processed: {} lines in {:.1f}s ({}/s)'.format(chunk, curr, int(chunk/curr), self.line_count, total_time, int(self.line_count/total_time)))
-                    timestamp = time.perf_counter()
-                    chunk = 0
-
-                line_full   = line.decode().split('\t')
+            try:
                 ngram_year  = int(line_full[1])
-
                 if self.min_year and ngram_year < self.min_year:
                     line = next_line()
                     continue
@@ -344,74 +416,92 @@ class NgramStream(NgramBase):
                 ngram_split = ngram_full.split(' ')
                 ngram_count = int(line_full[2])
                 ngram_vols  = int(line_full[3])
+            except:
+                print('\nERROR READING LINE_FULL:\n')
+                print(line_full)
+                line = next_line()
+                continue
 
-                self.extracted_count += 1
-                chunk += 1
-                added += 1
-                if ngram_full != current_ngram_text:
-                    if current_ngram != {}:
-                        self.ngram_stream.appendleft(current_ngram)
-                        if len(self.ngram_stream) > 30000:
-                            time.sleep((len(self.ngram_stream)**2) * 0.0000003)
-                    current_ngram_text = ngram_full
-                    current_ngram = {
-                        'n': len(ngram_split),
-                        'ngram_full': ngram_full,
-                        'letters': self.letters
-                    }
+            chunk += 1
+            added += 1
+            if ngram_full != current_ngram_text:
+                # if self.extracted_count % 50000 == 0:
+                #     print(ngram_full, current_ngram_text)
+                if current_ngram != {}:
+                    ngram_batch.appendleft(current_ngram)
+                    self.extracted_count += 1
+                    if len(ngram_batch) >= batch_size:
+                        self.ngram_stream.appendleft(ngram_batch)
+                        ngram_batch = deque()
+                    # self.ngram_stream.appendleft(current_ngram)
+                    # self.ngram_stream.put_nowait(current_ngram)
+                    # if batch_size * len(self.ngram_stream) > 50000:
+                    # time.sleep(batch_size * (len(self.ngram_stream)**1.01) * 0.000000001)
+                current_ngram_text = ngram_full
+                current_ngram = {
+                    'n': len(ngram_split),
+                    'ngram_full': ngram_full,
+                    'letters': self.letters
+                }
 
-                    if self.max_year:
-                        current_ngram['max_year'] = self.max_year
-                    if self.min_year:
-                        current_ngram['min_year'] = self.min_year
+                if self.max_year:
+                    current_ngram['max_year'] = self.max_year
+                if self.min_year:
+                    current_ngram['min_year'] = self.min_year
 
-                    for i in range(0, self.ngram):
-                        current_ngram['token_{}'.format(i+1)] = ngram_split[i]
+                for i in range(0, self.ngram):
+                    current_ngram['token_{}'.format(i+1)] = ngram_split[i]
 
-                    current_ngram['total_count'] = ngram_count
+                current_ngram['total_count'] = ngram_count
+                if self.volume_count:
+                    current_ngram['volumes_count'] = ngram_vols
+                if not self.aggregate_count:
+                    current_ngram['year_counts'] = {ngram_year: ngram_count}
                     if self.volume_count:
-                        current_ngram['volumes_count'] = ngram_vols
-                    if not self.aggregate_count:
-                        current_ngram['year_counts'] = {ngram_year: ngram_count}
-                        if self.volume_count:
-                            current_ngram['year_vols'] = {ngram_year: ngram_vols}
+                        current_ngram['year_vols'] = {ngram_year: ngram_vols}
 
-                        if (self.partial_aggregate
-                          and self.agg_min_year is not None
-                          and self.agg_max_year is not None):
-                            current_ngram['partial_aggregate_min'] = self.agg_min_year
-                            current_ngram['partial_aggregate_max'] = self.agg_max_year
-                            current_ngram['partial_aggregate'] = 0
+                    if (self.partial_aggregate
+                      and self.agg_min_year is not None
+                      and self.agg_max_year is not None):
+                        current_ngram['partial_aggregate_min'] = self.agg_min_year
+                        current_ngram['partial_aggregate_max'] = self.agg_max_year
+                        current_ngram['partial_aggregate'] = 0
+
+                        if self.volume_count:
+                            current_ngram['partial_aggregate_vols'] = 0
+
+                        if ngram_year >= self.agg_min_year and ngram_year <= self.agg_max_year:
+                            current_ngram['partial_aggregate'] = ngram_count
 
                             if self.volume_count:
-                                current_ngram['partial_aggregate_vols'] = 0
-
-                            if ngram_year >= self.agg_min_year and ngram_year <= self.agg_max_year:
-                                current_ngram['partial_aggregate'] = ngram_count
-
-                                if self.volume_count:
-                                    current_ngram['partial_aggregate_vols'] = ngram_vols
-                else:
-                    current_ngram['total_count'] += ngram_count
+                                current_ngram['partial_aggregate_vols'] = ngram_vols
+            else:
+                current_ngram['total_count'] += ngram_count
+                if self.volume_count:
+                    current_ngram['volumes_count'] += ngram_vols
+                if not self.aggregate_count:
+                    current_ngram['year_counts'][ngram_year] = ngram_count
                     if self.volume_count:
-                        current_ngram['volumes_count'] += ngram_vols
-                    if not self.aggregate_count:
-                        current_ngram['year_counts'][ngram_year] = ngram_count
-                        if self.volume_count:
-                            current_ngram['year_vols'][ngram_year] = ngram_count
+                        current_ngram['year_vols'][ngram_year] = ngram_count
 
-                        if (self.partial_aggregate and
-                          self.agg_min_year is not None and
-                          self.agg_max_year is not None):
-                            if ngram_year >= self.agg_min_year and ngram_year <= self.agg_max_year:
-                                current_ngram['partial_aggregate'] += ngram_count
+                    if (self.partial_aggregate and
+                      self.agg_min_year is not None and
+                      self.agg_max_year is not None):
+                        if ngram_year >= self.agg_min_year and ngram_year <= self.agg_max_year:
+                            current_ngram['partial_aggregate'] += ngram_count
 
-                                if self.volume_count:
-                                    current_ngram['partial_aggregate_vols'] += ngram_vols
+                            if self.volume_count:
+                                current_ngram['partial_aggregate_vols'] += ngram_vols
 
 
+            if not self.download_buffer.closed:
                 line = next_line()
+            else:
+                self.ngram_stream.appendleft(ngram_batch)
+                line = False
+                break
 
+        print('Exiting download thread; line:', line)
         self.thread_live = False
         return
 
