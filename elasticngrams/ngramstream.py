@@ -449,8 +449,12 @@ class NgramStream(NgramBase):
                 if self.min_year:
                     current_ngram['min_year'] = self.min_year
 
-                for i in range(0, self.ngram):
-                    current_ngram['token_{}'.format(i+1)] = ngram_split[i]
+                try:
+                    for i in range(0, self.ngram):
+                        current_ngram['token_{}'.format(i+1)] = ngram_split[i]
+                except:
+                    line = next_line()
+                    continue
 
                 current_ngram['total_count'] = ngram_count
                 if self.volume_count:
