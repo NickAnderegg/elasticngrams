@@ -497,9 +497,11 @@ class NgramStream(NgramBase):
             if not self.download_buffer.closed:
                 line = next_line()
             else:
-                self.ngram_stream.appendleft(ngram_batch)
                 line = False
-                break
+
+        ngram_batch.appendleft(current_ngram)
+        self.extracted_count += 1
+        self.ngram_stream.appendleft(ngram_batch)
 
         print('Exiting download thread; line:', line)
         self.thread_live = False
