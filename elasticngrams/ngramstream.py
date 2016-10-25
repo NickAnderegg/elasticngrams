@@ -437,19 +437,19 @@ class NgramStream(NgramBase):
                     # self.ngram_stream.put_nowait(current_ngram)
                     # if batch_size * len(self.ngram_stream) > 50000:
                     # time.sleep(batch_size * (len(self.ngram_stream)**1.01) * 0.000000001)
-                current_ngram_text = ngram_full
-                current_ngram = {
-                    'n': len(ngram_split),
-                    'ngram_full': ngram_full,
-                    'letters': self.letters
-                }
-
-                if self.max_year:
-                    current_ngram['max_year'] = self.max_year
-                if self.min_year:
-                    current_ngram['min_year'] = self.min_year
-
                 try:
+                    current_ngram_text = ngram_full
+                    current_ngram = {
+                        'n': len(ngram_split),
+                        'ngram_full': ngram_full,
+                        'letters': self.letters
+                    }
+
+                    if self.max_year:
+                        current_ngram['max_year'] = self.max_year
+                    if self.min_year:
+                        current_ngram['min_year'] = self.min_year
+
                     for i in range(0, self.ngram):
                         current_ngram['token_{}'.format(i+1)] = ngram_split[i]
                 except:
